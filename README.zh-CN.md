@@ -78,7 +78,7 @@ docker run -d -p 3000:3000 \
 
 ### 本地运行
 
-1. 安装 NodeJS 20。
+1. 安装 NodeJS 22+。
 2. 克隆本仓库。
 3. 运行 `npm install` 安装依赖。
 4. 将 `.env.example` 复制为 `.env.local` 并根据需要修改环境变量。

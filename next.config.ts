@@ -1,20 +1,19 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: 'standalone',
-  reactStrictMode: false,
-  pageExtensions: ['ts', 'tsx', 'js', 'jsx'],
-  serverExternalPackages: ['@napi-rs/canvas'],
-  logging: {
-    fetches: {
-      fullUrl: true
-    }
+  output: process.env.VERCEL ? undefined : 'standalone',
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: 'www.google.com',
+        pathname: '/s2/favicons'
+      }
+    ]
   },
+  serverExternalPackages: ['@napi-rs/canvas', 'pdf-parse', 'pdfjs-dist'],
   experimental: {
-    optimizePackageImports: ['lucide-react'],
-    serverActions: {
-      allowedOrigins: []
-    }
+    optimizePackageImports: ['lucide-react', 'radix-ui']
   }
 };
 

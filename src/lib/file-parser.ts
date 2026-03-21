@@ -1,17 +1,19 @@
-// File size limit: 10MB
-const MAX_PDF_SIZE = 10 * 1024 * 1024 // 10MB in bytes
+import { formatSizeInMB } from '@/lib/size'
+import { MAX_PDF_FILE_SIZE } from '@/services/constant'
 
-function formatRowsAsTable(rows: unknown[][], addSeparatorAfterHeader = true): string {
-  let content = ''
-  rows.forEach((row, index) => {
-    if (Array.isArray(row)) {
-      content += row.join(' | ') + '\n'
-      if (addSeparatorAfterHeader && index === 0) {
-        content += '-'.repeat(50) + '\n'
-      }
+type TableCell = string | number | boolean | null | undefined
+type TableRows = TableCell[][]
+
+function formatRowsAsTable(rows: TableRows, addSeparatorAfterHeader = true): string {
+  const lines: string[] = []
+  for (const [index, row] of rows.entries()) {
+    if (!Array.isArray(row)) continue
+    lines.push(row.join(' | '))
+    if (addSeparatorAfterHeader && index === 0) {
+      lines.push('-'.repeat(50))
     }
-  })
-  return content
+  }
+  return lines.length > 0 ? lines.join('\n') + '\n' : ''
 }
 
 export interface PDFImage {
@@ -29,81 +31,81 @@ export interface ParsedFile {
   images?: PDFImage[]
 }
 
-// Parse PDF file (server-side via API)
-export const parsePDF = async (file: File): Promise<ParsedFile> => {
-  try {
-    // Check file size before uploading (10MB limit)
-    if (file.size > MAX_PDF_SIZE) {
-      const sizeMB = (file.size / (1024 * 1024)).toFixed(2)
-      throw new Error(`File size (${sizeMB}MB) exceeds the maximum allowed size of 10MB`)
-    }
+function getNormalizedFileMimeType(file: File, fallbackMimeType: string): string {
+  const fileType = file.type.toLowerCase()
+  if (fileType && fileType !== 'application/octet-stream') {
+    return fileType
+  }
 
-    const formData = new FormData()
-    formData.append('file', file)
+  return fallbackMimeType
+}
 
-    const response = await fetch('/api/parse-pdf', {
-      method: 'POST',
-      body: formData
-    })
+async function parsePDF(file: File): Promise<ParsedFile> {
+  if (file.size > MAX_PDF_FILE_SIZE) {
+    throw new Error(
+      `File size (${formatSizeInMB(file.size)}) exceeds the maximum allowed size of ${formatSizeInMB(
+        MAX_PDF_FILE_SIZE
+      )}`
+    )
+  }
 
-    if (!response.ok) {
-      const errorData = await response.json()
-      throw new Error(errorData.error || 'Failed to parse PDF')
-    }
+  const formData = new FormData()
+  formData.append('file', file)
 
-    const data = await response.json()
+  const response = await fetch('/api/parse-pdf', {
+    method: 'POST',
+    body: formData
+  })
 
-    // Build content with text and image references
-    let content = `[PDF File: ${file.name}]\n\nPages: ${data.pages}\n\n`
+  if (!response.ok) {
+    const errorData = await response.json()
+    throw new Error(errorData.message || errorData.error || 'Failed to parse PDF')
+  }
 
-    // Add image summary if images exist
-    if (data.images && data.images.length > 0) {
-      content += `Images found: ${data.images.length}\n\n`
-    }
+  const data = await response.json()
 
-    content += data.content
+  let content = `[PDF File: ${file.name}]\n\nPages: ${data.pages}\n\n`
 
-    return {
-      name: file.name,
-      content,
-      mimeType: file.type,
-      images: data.images || []
-    }
-  } catch (error) {
-    console.error('PDF parsing error:', error)
-    return {
-      name: file.name,
-      content: `[PDF File: ${file.name}]\n\nUnable to extract text from this PDF. The file may be:\n- Image-based (scanned) PDF requiring OCR\n- Encrypted or password-protected\n- Corrupted or in an unsupported format\n\nError: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      mimeType: file.type
-    }
+  if (data.images && data.images.length > 0) {
+    content += `Images found: ${data.images.length}\n\n`
+  }
+
+  content += data.content
+
+  return {
+    name: file.name,
+    content,
+    mimeType: getNormalizedFileMimeType(file, 'application/pdf'),
+    images: data.images || []
   }
 }
 
-// Parse TXT file
-export const parseTXT = async (file: File): Promise<ParsedFile> => {
+async function parseTextDocument(file: File): Promise<ParsedFile> {
   const text = await file.text()
+  const fallbackMimeType = file.name.toLowerCase().endsWith('.md') ? 'text/markdown' : 'text/plain'
+
   return {
     name: file.name,
     content: text,
-    mimeType: file.type
+    mimeType: getNormalizedFileMimeType(file, fallbackMimeType)
   }
 }
 
-// Parse CSV file
-export const parseCSV = async (file: File): Promise<ParsedFile> => {
+async function parseCSV(file: File): Promise<ParsedFile> {
   const { default: Papa } = await import('papaparse')
+  const fallbackMimeType = 'text/csv'
 
   return new Promise((resolve, reject) => {
-    Papa.parse(file, {
+    Papa.parse<TableCell[]>(file, {
       complete: (results) => {
         let content = `[CSV File: ${file.name}]\n\n`
         if (results.data && results.data.length > 0) {
-          content += formatRowsAsTable(results.data as unknown[][])
+          content += formatRowsAsTable(results.data)
         }
         resolve({
           name: file.name,
           content,
-          mimeType: file.type
+          mimeType: getNormalizedFileMimeType(file, fallbackMimeType)
         })
       },
       error: (error) => {
@@ -113,17 +115,18 @@ export const parseCSV = async (file: File): Promise<ParsedFile> => {
   })
 }
 
-// Parse Excel file
-export const parseExcel = async (file: File): Promise<ParsedFile> => {
+async function parseExcel(file: File): Promise<ParsedFile> {
   const [arrayBuffer, XLSX] = await Promise.all([file.arrayBuffer(), import('xlsx')])
   const workbook = XLSX.read(arrayBuffer, { type: 'array' })
+  const fallbackMimeType = file.name.toLowerCase().endsWith('.xls')
+    ? 'application/vnd.ms-excel'
+    : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
   let content = `[Excel File: ${file.name}]\n\n`
 
-  // Process each sheet
-  workbook.SheetNames.forEach((sheetName, index) => {
+  for (const [index, sheetName] of workbook.SheetNames.entries()) {
     const worksheet = workbook.Sheets[sheetName]
-    const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as unknown[][]
+    const jsonData = XLSX.utils.sheet_to_json<TableCell[]>(worksheet, { header: 1 })
 
     content += `Sheet: ${sheetName}\n`
     content += '-'.repeat(50) + '\n'
@@ -132,12 +135,12 @@ export const parseExcel = async (file: File): Promise<ParsedFile> => {
     if (index < workbook.SheetNames.length - 1) {
       content += '\n'
     }
-  })
+  }
 
   return {
     name: file.name,
     content,
-    mimeType: file.type
+    mimeType: getNormalizedFileMimeType(file, fallbackMimeType)
   }
 }
 
@@ -146,8 +149,12 @@ type FileParser = (file: File) => Promise<ParsedFile>
 const fileTypeParsers: Array<{ test: (type: string, name: string) => boolean; parse: FileParser }> =
   [
     {
-      test: (type, name) => type === 'text/plain' || name.endsWith('.txt'),
-      parse: parseTXT
+      test: (type, name) =>
+        type === 'text/plain' ||
+        type === 'text/markdown' ||
+        name.endsWith('.txt') ||
+        name.endsWith('.md'),
+      parse: parseTextDocument
     },
     {
       test: (type, name) => type === 'text/csv' || name.endsWith('.csv'),
@@ -167,7 +174,6 @@ const fileTypeParsers: Array<{ test: (type: string, name: string) => boolean; pa
     }
   ]
 
-// Main file parser function
 export async function parseFile(file: File): Promise<ParsedFile> {
   const fileType = file.type.toLowerCase()
   const fileName = file.name.toLowerCase()

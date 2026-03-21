@@ -1,284 +1,195 @@
 'use client'
 
-import { memo, useCallback, useDeferredValue, useMemo, type ReactNode } from 'react'
-import { getTextFromParts } from '@/components/chat/chat-attachments'
-import type {
-  ChatMessage,
-  ChatMessagePart,
-  ChatMessageSource,
-  DocumentAttachmentData
-} from '@/components/chat/interface'
-import { Markdown } from '@/components/markdown/markdown'
-import { Button } from '@/components/ui/button'
+import { memo, useCallback, useDeferredValue, useId, useMemo, type ReactNode } from 'react'
+import dynamic from 'next/dynamic'
+import { CopyStatusAnnouncement } from '@/components/accessibility/copy-status-announcement'
+import {
+  InlineCitationBadge,
+  SourcesList,
+  SourcesToggle,
+  useSourcesExpanded
+} from '@/components/chat/message-sources-view'
+import { renderUserParts } from '@/components/chat/message-user-parts'
+import { AnimatedDots } from '@/components/common/animated-dots'
+import { AppIconButton } from '@/components/common/app-button'
+import { ButtonWithTooltip } from '@/components/common/button-with-tooltip'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
+import { useInViewport } from '@/hooks/useInViewport'
+import { getTextFromParts } from '@/lib/chat-attachments'
+import type { ChatStreamStatus } from '@/lib/chat-utils'
+import type { ChatMessage, ChatMessageSource } from '@/lib/types'
 import { cn } from '@/lib/utils'
-import { Check, Copy, ExternalLink, FileText } from 'lucide-react'
+import { Check, Copy } from 'lucide-react'
 
-export interface MessageProps {
+import { getSourcesFromParts, stripTrailingSourceMarkdownLinks } from './message-sources'
+
+const Markdown = dynamic(() =>
+  import('@/components/markdown/markdown').then((mod) => ({ default: mod.Markdown }))
+)
+
+interface MessageProps {
   message: ChatMessage
   isThinking?: boolean
+  streamStatus?: ChatStreamStatus
 }
 
-function getMessageParts(message: ChatMessage): ChatMessagePart[] {
-  return Array.isArray(message.parts) ? message.parts : []
-}
-
-function renderDocumentPreview(doc: DocumentAttachmentData, key: string | number): ReactNode {
+function StreamingDots(): React.JSX.Element {
   return (
-    <div key={key} className="border-border bg-muted/50 mt-2 rounded-lg border p-3">
-      <div className="mb-2 flex items-center gap-2">
-        <FileText className="text-muted-foreground size-4" />
-        <span className="text-sm font-medium">{doc.name}</span>
-      </div>
-      <div className="text-muted-foreground max-h-40 overflow-y-auto text-xs break-words whitespace-pre-wrap">
-        {doc.content.slice(0, 500)}
-        {doc.content.length > 500 && '...'}
-      </div>
-    </div>
+    <AnimatedDots
+      className="inline-flex items-center gap-1.5"
+      dotClassName="bg-card-foreground/60"
+      activeAnimationClassName="animate-[streaming-bounce_0.9s_ease-in-out_infinite]"
+      delayStepMs={150}
+      srLabel="Thinking…"
+    />
   )
 }
 
-function renderUserParts(parts: ChatMessagePart[]): ReactNode {
-  return parts.map((part, index) => {
-    switch (part.type) {
-      case 'text':
-        return <span key={index}>{part.text}</span>
-      case 'file':
-        if (part.mediaType.startsWith('image/')) {
-          return (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              key={index}
-              src={part.url}
-              alt="Uploaded"
-              className="mt-2 max-h-[300px] max-w-full rounded-lg"
-            />
-          )
-        }
-        return null
-      case 'data-document':
-        return renderDocumentPreview(part.data, index)
-      default: {
-        if (process.env.NODE_ENV === 'development') {
-          console.warn(`[message.tsx] Unhandled message part type: ${part.type}`)
-        }
-        return null
-      }
-    }
-  })
-}
-
-function getTextContent(parts: ChatMessagePart[]): string {
-  return getTextFromParts(parts)
-}
-
-function dedupeSources(sources: ChatMessageSource[]): ChatMessageSource[] {
-  const seen = new Set<string>()
-  const deduped: ChatMessageSource[] = []
-
-  for (const source of sources) {
-    const key =
-      source.type === 'url'
-        ? `url:${source.url}`
-        : `document:${source.mediaType}:${source.filename ?? ''}:${source.title}`
-
-    if (seen.has(key)) continue
-    seen.add(key)
-    deduped.push(source)
-  }
-
-  return deduped
-}
-
-function stripTrailingSourceMarkdownLinks(text: string, sources: ChatMessageSource[]): string {
-  const urlSources = sources.filter((source) => source.type === 'url')
-  if (urlSources.length === 0) return text
-
-  const urls = new Set(urlSources.map((source) => source.url))
-
-  let working = text.trimEnd()
-  let strippedCount = 0
-
-  while (true) {
-    const match = working.match(/\[([^\]]+)\]\(([^)]+)\)\s*$/)
-    if (!match) break
-    const matchedUrl = match[2]
-    if (!urls.has(matchedUrl)) break
-    strippedCount += 1
-    working = working.slice(0, Math.max(0, working.length - match[0].length)).trimEnd()
-  }
-
-  // Keep single trailing links in the main answer (they are often intentional).
-  return strippedCount >= 2 ? working : text
-}
-
-function getSourcesFromParts(parts: ChatMessagePart[]): ChatMessageSource[] {
-  const sourcesFromParts: ChatMessageSource[] = []
-  for (const part of parts) {
-    if (part.type === 'source-url') {
-      sourcesFromParts.push({
-        type: 'url',
-        id: part.sourceId,
-        url: part.url,
-        title: part.title
-      })
-    } else if (part.type === 'source-document') {
-      sourcesFromParts.push({
-        type: 'document',
-        id: part.sourceId,
-        mediaType: part.mediaType,
-        title: part.title,
-        filename: part.filename
-      })
-    }
-  }
-
-  return dedupeSources(sourcesFromParts)
-}
-
-function getSourceTitle(source: ChatMessageSource): string {
-  if (source.type === 'url') {
-    return source.title || source.url
-  }
-
-  if (source.filename) {
-    return source.title || `Document: ${source.filename}`
-  }
-
-  return source.title || 'Document'
-}
-
-function Sources({ sources }: { sources: ChatMessageSource[] }): React.JSX.Element | null {
-  if (sources.length === 0) {
-    return null
-  }
+function StreamingCursor(): React.JSX.Element {
+  const [cursorRef, isInView] = useInViewport<HTMLSpanElement>()
 
   return (
-    <div className="mt-3 w-full space-y-2">
-      <h4 className="text-muted-foreground flex items-center gap-1.5 text-sm font-semibold text-balance">
-        <ExternalLink className="size-3.5" aria-hidden="true" />
-        Sources
-      </h4>
-      <div className="space-y-1.5">
-        {sources.map((source, idx) => {
-          const url = source.type === 'url' ? source.url : undefined
-          const title = getSourceTitle(source)
-
-          const Element = url ? 'a' : 'div'
-          const linkProps = url
-            ? { href: url, target: '_blank' as const, rel: 'noopener noreferrer' }
-            : {}
-
-          return (
-            <Element
-              key={source.id}
-              {...linkProps}
-              className="border-border bg-background/50 hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:ring-ring/50 focus-visible:ring-offset-background group/source flex items-start gap-2 rounded-lg border px-3 py-2 text-xs transition-colors focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
-            >
-              <span className="text-muted-foreground shrink-0 font-medium">[{idx + 1}]</span>
-              <div className="min-w-0 flex-1">
-                <div className="text-foreground group-hover/source:text-primary line-clamp-1 font-medium">
-                  {title}
-                </div>
-                {url && (
-                  <div className="text-muted-foreground mt-0.5 line-clamp-1 text-xs leading-tight">
-                    {url}
-                  </div>
-                )}
-              </div>
-              {url && (
-                <ExternalLink
-                  className="text-muted-foreground mt-0.5 size-3 shrink-0"
-                  aria-hidden="true"
-                />
-              )}
-            </Element>
-          )
-        })}
-      </div>
-    </div>
+    <span
+      ref={cursorRef}
+      aria-hidden="true"
+      className={cn(
+        'bg-card-foreground/50 pointer-events-none absolute right-3 bottom-3 h-4 w-1 rounded-full motion-reduce:animate-none',
+        isInView && 'animate-pulse'
+      )}
+    />
   )
 }
 
 function UserMessage({ message }: MessageProps): React.JSX.Element {
-  const parts = getMessageParts(message)
-
   return (
-    <div className="group/message animate-in fade-in slide-in-from-bottom-2 flex w-full justify-end duration-200 motion-reduce:animate-none">
+    <div className="flex w-full justify-end">
       <div className="flex max-w-[90%] min-w-0 flex-col items-end md:max-w-[85%]">
-        <div className="bg-primary text-primary-foreground max-w-full overflow-hidden rounded-2xl rounded-br-md px-4 py-3 break-words shadow-sm transition-[border-color,box-shadow] duration-200 hover:shadow-md">
-          <div className="leading-relaxed whitespace-pre-wrap">{renderUserParts(parts)}</div>
+        <div className="bg-secondary text-secondary-foreground max-w-full rounded-2xl rounded-br-md px-4 py-3 break-words shadow-sm hover:shadow-md">
+          <div className="text-base leading-relaxed whitespace-pre-wrap">
+            {renderUserParts(message.parts)}
+          </div>
         </div>
       </div>
     </div>
   )
 }
 
-function AssistantMessage({ message, isThinking }: MessageProps): React.JSX.Element {
-  const parts = getMessageParts(message)
+function AssistantMessage({ message, isThinking, streamStatus }: MessageProps): React.JSX.Element {
+  const parts = message.parts
   const sources = useMemo(() => getSourcesFromParts(parts), [parts])
-  const deferredParts = useDeferredValue(parts)
   const { copy, copied } = useCopyToClipboard()
+  const { expanded: sourcesExpanded, toggle: toggleSources } = useSourcesExpanded()
+  const sourceListId = useId()
 
+  const fullText = useMemo(() => getTextFromParts(parts), [parts])
+  const deferredText = useDeferredValue(fullText)
   const markdownSource = useMemo(() => {
-    const rawText = getTextContent(deferredParts)
-    return sources.length > 0 ? stripTrailingSourceMarkdownLinks(rawText, sources) : rawText
-  }, [deferredParts, sources])
+    return sources.length > 0
+      ? stripTrailingSourceMarkdownLinks(deferredText, sources)
+      : deferredText
+  }, [deferredText, sources])
+  const sourceUrlMap = useMemo(() => {
+    const urlMap = new Map<string, { index: number; source: ChatMessageSource }>()
 
-  const copyText = useMemo(() => getTextContent(parts), [parts])
-  const hasTextContent = copyText.trim().length > 0
-  const showThinking = Boolean(isThinking) && !hasTextContent
+    for (let index = 0; index < sources.length; index += 1) {
+      const source = sources[index]
+
+      if (source.type === 'url') {
+        urlMap.set(source.url, { index, source })
+      }
+    }
+
+    return urlMap
+  }, [sources])
+  const renderLinkAnnotation = useCallback(
+    function renderLinkAnnotation(href: string): ReactNode | null {
+      const match = sourceUrlMap.get(href)
+
+      if (!match) {
+        return null
+      }
+
+      return <InlineCitationBadge index={match.index} source={match.source} />
+    },
+    [sourceUrlMap]
+  )
+
+  const hasCopyText = fullText.trim().length > 0
+  const hasRenderedText = deferredText.trim().length > 0
+  const showWaitingDots = isThinking && !hasRenderedText
+  const showCursor = isThinking && streamStatus === 'streaming' && hasRenderedText
 
   const handleCopy = useCallback(() => {
-    void copy(copyText)
-  }, [copy, copyText])
+    void copy(fullText)
+  }, [copy, fullText])
 
   return (
-    <div className="group/message animate-in fade-in slide-in-from-bottom-2 flex w-full justify-start duration-200 motion-reduce:animate-none">
+    <div className="flex w-full justify-start">
       <div className="flex max-w-[90%] min-w-0 flex-col items-start md:max-w-[85%]">
-        <div className="border-border/50 bg-card text-foreground hover:border-border/70 max-w-full overflow-hidden rounded-2xl rounded-bl-md border px-4 py-3 break-words shadow-sm transition-[border-color,box-shadow] duration-200 hover:shadow-md">
-          <div className="prose-sm leading-relaxed">
-            {showThinking ? (
-              <span className="text-muted-foreground font-medium">Thinking...</span>
+        <div className="bg-muted text-foreground relative max-w-full rounded-2xl rounded-bl-md px-4 py-3 break-words shadow-sm hover:shadow-md">
+          <div className="text-base leading-relaxed">
+            {showWaitingDots ? (
+              <StreamingDots />
             ) : (
-              <Markdown>{markdownSource}</Markdown>
+              <Markdown
+                renderLinkAnnotation={sourceUrlMap.size > 0 ? renderLinkAnnotation : undefined}
+              >
+                {markdownSource}
+              </Markdown>
             )}
           </div>
+          {showCursor && <StreamingCursor />}
         </div>
-        {sources.length > 0 && <Sources sources={sources} />}
-        {hasTextContent && (
-          <Button
-            size="sm"
-            variant="outline"
-            className={cn(
-              'group/copy mt-1.5 ml-1 rounded-lg shadow-none transition-colors duration-200 disabled:opacity-100',
-              copied
-                ? 'border-primary/30 bg-primary/5 text-primary'
-                : 'hover:border-primary/30 hover:bg-primary/5 hover:text-primary'
-            )}
-            disabled={copied}
-            onClick={handleCopy}
-            aria-label={copied ? 'Copied' : 'Copy to clipboard'}
-          >
-            {copied ? (
-              <Check className="size-3.5" />
-            ) : (
-              <Copy className="size-3.5 transition-transform duration-200 group-hover/copy:scale-110" />
-            )}
-            <span className="text-xs font-medium">{copied ? 'Copied' : 'Copy'}</span>
-          </Button>
+        {(sources.length > 0 || hasCopyText) && (
+          <>
+            <div className="mt-1 flex w-full max-w-full items-center">
+              {hasCopyText && (
+                <>
+                  <ButtonWithTooltip label={copied ? 'Copied' : 'Copy'}>
+                    <AppIconButton
+                      variant="ghost"
+                      size="icon-sm"
+                      touch={false}
+                      mutedDisabled={false}
+                      className={cn(
+                        'text-muted-foreground size-11 transition-colors duration-200 md:size-7',
+                        copied ? 'text-accent-foreground' : 'hover:text-foreground'
+                      )}
+                      disabled={copied}
+                      onClick={handleCopy}
+                      aria-label={copied ? 'Message copied to clipboard' : 'Copy to clipboard'}
+                    >
+                      {copied ? (
+                        <Check className="size-3.5" aria-hidden="true" />
+                      ) : (
+                        <Copy className="size-3.5" aria-hidden="true" />
+                      )}
+                    </AppIconButton>
+                  </ButtonWithTooltip>
+                  <CopyStatusAnnouncement copied={copied} message="Message copied to clipboard." />
+                </>
+              )}
+              <SourcesToggle
+                sources={sources}
+                expanded={sourcesExpanded}
+                onToggle={toggleSources}
+                sourceListId={sourceListId}
+              />
+            </div>
+            <SourcesList sources={sources} expanded={sourcesExpanded} sourceListId={sourceListId} />
+          </>
         )}
       </div>
     </div>
   )
 }
 
-function MessageComponent({ message, isThinking }: MessageProps): React.JSX.Element {
+function MessageComponent({ message, isThinking, streamStatus }: MessageProps): React.JSX.Element {
   if (message.role === 'user') {
     return <UserMessage message={message} />
   }
 
-  return <AssistantMessage message={message} isThinking={isThinking} />
+  return <AssistantMessage message={message} isThinking={isThinking} streamStatus={streamStatus} />
 }
 
 export const Message = memo(MessageComponent)
